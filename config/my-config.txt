@@ -15,7 +15,7 @@ OPENWRT_KERNEL=6.18.y
 AUTO_KERNEL=true
 
 # 固件签名（不要有空格）
-BUILDER_NAME=yourname
+BUILDER_NAME=my_fine3399_imm
 
 # 源码分支（openwrt_main / lede_master / immortalwrt_master）
 SOURCE_BRANCH=immortalwrt_master
