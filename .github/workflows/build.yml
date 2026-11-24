@@ -2,18 +2,24 @@ name: Build My OpenWrt
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Force rebuild even if upstream tag is unchanged"
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [main]
     paths:
       - 'config/my-config.txt'
       - '.github/workflows/build.yml'
   schedule:
-    # 每天 UTC 03:00（北京时间 11:00）检查上游更新
-    - cron: "0 3 * * *"
+    - cron: "23 3 * * *"
 
 concurrency:
   group: openwrt-build
   cancel-in-progress: false
+  queue: max
 
 jobs:
   build:
@@ -24,6 +30,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Load my config
         id: cfg
@@ -39,6 +48,8 @@ jobs:
             echo "builder_name=${BUILDER_NAME}"
             echo "source_branch=${SOURCE_BRANCH}"
           } >> "$GITHUB_OUTPUT"
+          echo "### My config:"
+          cat config/my-config.txt
 
       - name: Detect upstream latest rootfs
         id: detect
@@ -46,7 +57,6 @@ jobs:
           BRANCH="${{ steps.cfg.outputs.source_branch }}"
           PREFIX="OpenWrt_${BRANCH}_"
 
-          # 用 atom feed 查最新 tag（不走 REST API，避免限流）
           TAG=$(curl -fsSL "https://github.com/ophub/amlogic-s9xxx-openwrt/releases.atom" \
                 | grep -oP "(?<=<title>)${PREFIX}[^<]+" \
                 | head -n1)
@@ -57,7 +67,6 @@ jobs:
           fi
           echo "Upstream latest tag: ${TAG}"
 
-          # 查该 tag 下的 rootfs 资源名（不同分支前缀不同）
           ASSET=$(curl -fsSL "https://github.com/ophub/amlogic-s9xxx-openwrt/releases/expanded_assets/${TAG}" \
                   | grep -oP 'releases/download/[^"]+-rootfs\.tar\.gz' \
                   | head -n1)
@@ -75,7 +84,39 @@ jobs:
             echo "upstream_tag=${TAG}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Check if rebuild needed
+        id: check
+        run: |
+          TAG="${{ steps.detect.outputs.upstream_tag }}"
+          FORCE="${{ inputs.force || false }}"
+          BUILDER="${{ steps.cfg.outputs.builder_name }}"
+          IP="${{ steps.cfg.outputs.openwrt_ip }}"
+          BOARD="${{ steps.cfg.outputs.openwrt_board }}"
+          KERNEL="${{ steps.cfg.outputs.openwrt_kernel }}"
+
+          FINGERPRINT="${TAG}|${BUILDER}|${IP}|${BOARD}|${KERNEL}"
+
+          PREV=""
+          if [[ -f .build-state ]]; then
+            PREV=$(cat .build-state | tr -d '\n')
+          fi
+
+          echo "Previous fingerprint: ${PREV:-<none>}"
+          echo "Current  fingerprint: ${FINGERPRINT}"
+
+          if [[ "${FORCE}" == "true" ]]; then
+            echo "FORCE=true -> rebuild anyway."
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${PREV}" == "${FINGERPRINT}" ]]; then
+            echo "Upstream tag and config unchanged -> skip rebuild."
+            echo "need_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected -> rebuild."
+            echo "need_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Package OpenWrt for target boards
+        if: steps.check.outputs.need_build == 'true'
         uses: ophub/amlogic-s9xxx-openwrt@main
         with:
           openwrt_path: ${{ steps.detect.outputs.rootfs_url }}
@@ -86,8 +127,8 @@ jobs:
           builder_name: ${{ steps.cfg.outputs.builder_name }}
 
       - name: Upload packaged OpenWrt to Release
+        if: steps.check.outputs.need_build == 'true' && env.PACKAGED_STATUS == 'success'
         uses: ophub/upload-to-releases@main
-        if: ${{ env.PACKAGED_STATUS == 'success' }}
         with:
           tag: ${{ steps.cfg.outputs.builder_name }}_${{ steps.detect.outputs.upstream_tag }}
           artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
@@ -102,3 +143,29 @@ jobs:
             - Board: `${{ steps.cfg.outputs.openwrt_board }}`
             - Kernel: `${{ steps.cfg.outputs.openwrt_kernel }}`
             - Builder: `${{ steps.cfg.outputs.builder_name }}`
+
+      - name: Save build state
+        if: steps.check.outputs.need_build == 'true' && env.PACKAGED_STATUS == 'success'
+        run: |
+          TAG="${{ steps.detect.outputs.upstream_tag }}"
+          BUILDER="${{ steps.cfg.outputs.builder_name }}"
+          IP="${{ steps.cfg.outputs.openwrt_ip }}"
+          BOARD="${{ steps.cfg.outputs.openwrt_board }}"
+          KERNEL="${{ steps.cfg.outputs.openwrt_kernel }}"
+          printf '%s|%s|%s|%s|%s\n' "$TAG" "$BUILDER" "$IP" "$BOARD" "$KERNEL" > .build-state
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .build-state
+          git commit -m "chore: update build state [${TAG}]" || echo "Nothing to commit."
+          git push origin HEAD:main
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "### Build Summary"
+            echo ""
+            echo "- Upstream tag: \`${{ steps.detect.outputs.upstream_tag }}\`"
+            echo "- Need build: \`${{ steps.check.outputs.need_build || 'false' }}\`"
+            echo "- Status: \`${{ env.PACKAGED_STATUS || 'skipped' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
