@@ -1,0 +1,104 @@
+name: Build My OpenWrt
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'config/my-config.txt'
+      - '.github/workflows/build.yml'
+  schedule:
+    # 每天 UTC 03:00（北京时间 11:00）检查上游更新
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: openwrt-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Load my config
+        id: cfg
+        run: |
+          set -a
+          source config/my-config.txt
+          set +a
+          {
+            echo "openwrt_ip=${OPENWRT_IP}"
+            echo "openwrt_board=${OPENWRT_BOARD}"
+            echo "openwrt_kernel=${OPENWRT_KERNEL}"
+            echo "auto_kernel=${AUTO_KERNEL}"
+            echo "builder_name=${BUILDER_NAME}"
+            echo "source_branch=${SOURCE_BRANCH}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Detect upstream latest rootfs
+        id: detect
+        run: |
+          BRANCH="${{ steps.cfg.outputs.source_branch }}"
+          PREFIX="OpenWrt_${BRANCH}_"
+
+          # 用 atom feed 查最新 tag（不走 REST API，避免限流）
+          TAG=$(curl -fsSL "https://github.com/ophub/amlogic-s9xxx-openwrt/releases.atom" \
+                | grep -oP "(?<=<title>)${PREFIX}[^<]+" \
+                | head -n1)
+
+          if [[ -z "${TAG}" ]]; then
+            echo "::error::No release tag found for prefix ${PREFIX}"
+            exit 1
+          fi
+          echo "Upstream latest tag: ${TAG}"
+
+          # 查该 tag 下的 rootfs 资源名（不同分支前缀不同）
+          ASSET=$(curl -fsSL "https://github.com/ophub/amlogic-s9xxx-openwrt/releases/expanded_assets/${TAG}" \
+                  | grep -oP 'releases/download/[^"]+-rootfs\.tar\.gz' \
+                  | head -n1)
+
+          if [[ -z "${ASSET}" ]]; then
+            echo "::error::No rootfs asset found in tag ${TAG}"
+            exit 1
+          fi
+
+          URL="https://github.com/ophub/amlogic-s9xxx-openwrt/${ASSET}"
+          echo "Rootfs URL: ${URL}"
+
+          {
+            echo "rootfs_url=${URL}"
+            echo "upstream_tag=${TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Package OpenWrt for target boards
+        uses: ophub/amlogic-s9xxx-openwrt@main
+        with:
+          openwrt_path: ${{ steps.detect.outputs.rootfs_url }}
+          openwrt_board: ${{ steps.cfg.outputs.openwrt_board }}
+          openwrt_kernel: ${{ steps.cfg.outputs.openwrt_kernel }}
+          auto_kernel: ${{ steps.cfg.outputs.auto_kernel }}
+          openwrt_ip: ${{ steps.cfg.outputs.openwrt_ip }}
+          builder_name: ${{ steps.cfg.outputs.builder_name }}
+
+      - name: Upload packaged OpenWrt to Release
+        uses: ophub/upload-to-releases@main
+        if: ${{ env.PACKAGED_STATUS == 'success' }}
+        with:
+          tag: ${{ steps.cfg.outputs.builder_name }}_${{ steps.detect.outputs.upstream_tag }}
+          artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            ### My Custom OpenWrt
+            - Upstream: `${{ steps.detect.outputs.upstream_tag }}`
+            - IP: `${{ steps.cfg.outputs.openwrt_ip }}`
+            - Board: `${{ steps.cfg.outputs.openwrt_board }}`
+            - Kernel: `${{ steps.cfg.outputs.openwrt_kernel }}`
+            - Builder: `${{ steps.cfg.outputs.builder_name }}`
