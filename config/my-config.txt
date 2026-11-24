@@ -1,0 +1,21 @@
+# ==========================================
+# 我的自定义配置（只改这里，其他不用动）
+# ==========================================
+
+# 目标 IP 地址
+OPENWRT_IP=192.168.2.116
+
+# 目标机型（用下划线连接多个）
+OPENWRT_BOARD=fine3399
+
+# 内核版本
+OPENWRT_KERNEL=6.18.y
+
+# 自动取该系列最新内核
+AUTO_KERNEL=true
+
+# 固件签名（不要有空格）
+BUILDER_NAME=yourname
+
+# 源码分支（openwrt_main / lede_master / immortalwrt_master）
+SOURCE_BRANCH=immortalwrt_master
