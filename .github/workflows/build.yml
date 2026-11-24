@@ -13,6 +13,7 @@ on:
     paths:
       - 'config/my-config.txt'
       - '.github/workflows/build.yml'
+      - 'extra-files/**'
   schedule:
     - cron: "23 3 * * *"
 
@@ -48,6 +49,7 @@ jobs:
             echo "builder_name=${BUILDER_NAME}"
             echo "source_branch=${SOURCE_BRANCH}"
             echo "add_argon=${ADD_ARGON:-true}"
+            echo "add_tempinfo=${ADD_TEMPINFO:-true}"
           } >> "$GITHUB_OUTPUT"
           echo "### My config:"
           cat config/my-config.txt
@@ -190,6 +192,57 @@ jobs:
           echo "Argon uci-defaults:"
           ls argon-files/etc/uci-defaults/
 
+      - name: Prepare custom overlay files
+        if: steps.check.outputs.need_build == 'true'
+        run: |
+          set -e
+          rm -rf overlay-files
+          mkdir -p overlay-files
+
+          # Temperature display: /sbin/tempinfo + rpcd ACL
+          if [[ "${{ steps.cfg.outputs.add_tempinfo }}" == "true" ]]; then
+            echo "Adding temperature display files..."
+            mkdir -p overlay-files/sbin overlay-files/usr/share/rpcd/acl.d
+            cp extra-files/sbin/tempinfo overlay-files/sbin/tempinfo
+            cp extra-files/usr/share/rpcd/acl.d/luci-status-extra.json \
+               overlay-files/usr/share/rpcd/acl.d/luci-status-extra.json
+            chmod 0755 overlay-files/sbin/tempinfo
+            chmod 0644 overlay-files/usr/share/rpcd/acl.d/luci-status-extra.json
+            echo "  overlay-files/sbin/tempinfo"
+            echo "  overlay-files/usr/share/rpcd/acl.d/luci-status-extra.json"
+          fi
+
+          # Merge any other files under extra-files/
+          if [[ -d extra-files ]]; then
+            find extra-files -type f | while read -r f; do
+              rel="${f#extra-files/}"
+              case "${rel}" in
+                sbin/tempinfo|usr/share/rpcd/acl.d/luci-status-extra.json)
+                  continue ;;
+              esac
+              mkdir -p "overlay-files/$(dirname "${rel}")"
+              cp "${f}" "overlay-files/${rel}"
+              echo "  extra-files/${rel}"
+            done
+          fi
+
+          echo "Overlay tree:"
+          find overlay-files -type f | sort
+
+          # Normalize line endings: shell scripts must use LF, CRLF breaks them
+          echo "Normalizing line endings..."
+          find overlay-files -type f -name '*.sh' -o -type f -path '*/sbin/*' | while read -r f; do
+            if file "$f" | grep -q 'CRLF'; then
+              echo "  converting CRLF -> LF: ${f}"
+              sed -i 's/\r$//' "$f"
+            fi
+          done
+
+          if [[ -f overlay-files/sbin/tempinfo ]]; then
+            chmod 0755 overlay-files/sbin/tempinfo
+            head -1 overlay-files/sbin/tempinfo
+          fi
+
       - name: Package OpenWrt for target boards
         if: steps.check.outputs.need_build == 'true'
         uses: ophub/amlogic-s9xxx-openwrt@main
@@ -200,7 +253,7 @@ jobs:
           auto_kernel: ${{ steps.cfg.outputs.auto_kernel }}
           openwrt_ip: ${{ steps.cfg.outputs.openwrt_ip }}
           builder_name: ${{ steps.cfg.outputs.builder_name }}
-          openwrt_files: ${{ steps.cfg.outputs.add_argon == 'true' && 'argon-files' || '' }}
+          openwrt_files: overlay-files
 
       - name: Upload packaged OpenWrt to Release
         if: steps.check.outputs.need_build == 'true' && env.PACKAGED_STATUS == 'success'
