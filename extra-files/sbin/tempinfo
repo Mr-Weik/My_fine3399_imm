@@ -1,0 +1,130 @@
+#!/bin/sh
+#
+# /sbin/tempinfo —— 输出设备温度，供 LuCI 主页显示。
+#
+# LuCI 的 rpcd 里的 luci.getTempInfo 就是直接执行本脚本并把 stdout
+# 原样塞进主页的 "Temperature" 字段：
+#
+#     getTempInfo: {
+#         call: function() {
+#             if (!access('/sbin/tempinfo'))
+#                 return {};
+#             const fd = popen('/sbin/tempinfo');
+#             ...
+#
+# 所以只要本脚本存在并输出一行人类可读的文本，主页就会自动多出
+# 温度这一项 —— 不需要改动任何 LuCI 核心文件。
+#
+# 读取策略（按优先级）：
+#   1. /sys/class/thermal/thermal_zone*/  —— 内核 thermal 框架，最通用
+#   2. /sys/class/hwmon/hwmon*/            —— hwmon 驱动
+#   3. /sbin/sensors（lm-sensors）          —— 兜底
+#
+# 输出格式（与社区惯例一致）：
+#     CPU: 62.9°C
+#     CPU: 62.9°C / GPU: 58.1°C
+#
+# 注意：任何一步失败都不能让脚本以非 0 退出，
+# LuCI 对空输出会显示 "?"。
+
+set -u
+
+# 温度值统一转成 "%.1f°C"
+fmt() {
+	awk -v v="$1" 'BEGIN { printf "%.1f", v / 1000 }' 2>/dev/null
+}
+
+# 从 thermal_zone 读，type 里带关键字的优先
+read_thermal_zone() {
+	for want in cpu-thermal soc-thermal cpuss-thermal tsens-thermal \
+	            gpu-thermal gput-thermal; do
+		for z in /sys/class/thermal/thermal_zone*; do
+			[ -r "$z/type" ] || continue
+			[ -r "$z/temp" ] || continue
+			zt=$(cat "$z/type" 2>/dev/null)
+			[ "$zt" = "$want" ] || continue
+			raw=$(cat "$z/temp" 2>/dev/null)
+			case "$raw" in
+				''|*[!0-9-]*) continue ;;
+			esac
+			# 过滤明显无效的值
+			[ "$raw" -gt -20000 ] && [ "$raw" -lt 150000 ] || continue
+			fmt "$raw"
+			return 0
+		done
+	done
+	return 1
+}
+
+# 从 hwmon 读
+read_hwmon() {
+	for want in cpu_thermal cpu-thermal soc_thermal x86_pkg_temp \
+	            gpu_thermal gput_thermal; do
+		for h in /sys/class/hwmon/hwmon*; do
+			[ -r "$h/name" ] || continue
+			hn=$(cat "$h/name" 2>/dev/null)
+			[ "$hn" = "$want" ] || continue
+			for f in "$h"/temp*_input; do
+				[ -r "$f" ] || continue
+				raw=$(cat "$f" 2>/dev/null)
+				case "$raw" in
+					''|*[!0-9-]*) continue ;;
+				esac
+				[ "$raw" -gt -20000 ] && [ "$raw" -lt 150000 ] || continue
+				fmt "$raw"
+				return 0
+			done
+		done
+	done
+	return 1
+}
+
+# 兜底：lm-sensors
+read_sensors() {
+	command -v sensors >/dev/null 2>&1 || return 1
+	out=$(sensors 2>/dev/null | awk '
+		/^cpu_thermal|^cpu-thermal|^soc_thermal|^coretemp-.*:|^k10temp/ {
+			if (match($0, /\+[0-9]+\.[0-9]+/)) {
+				v = substr($0, RSTART + 1, RLENGTH - 1)
+				print v
+				exit
+			}
+		}
+	')
+	[ -n "$out" ] || return 1
+	printf '%s' "$out"
+}
+
+cpu=""
+gpu=""
+
+cpu=$(read_thermal_zone) || cpu=""
+[ -n "$cpu" ] || cpu=$(read_hwmon) || cpu=""
+[ -n "$cpu" ] || cpu=$(read_sensors) || cpu=""
+
+# GPU 单独取（可失败）
+for want in gpu-thermal gput-thermal gpu_thermal; do
+	for z in /sys/class/thermal/thermal_zone*; do
+		[ -r "$z/type" ] || continue
+		[ "$(cat "$z/type" 2>/dev/null)" = "$want" ] || continue
+		raw=$(cat "$z/temp" 2>/dev/null)
+		case "$raw" in
+			''|*[!0-9-]*) continue ;;
+		esac
+		gpu=$(fmt "$raw")
+		break
+	done
+	[ -n "$gpu" ] && break
+done
+
+if [ -n "$cpu" ]; then
+	if [ -n "$gpu" ]; then
+		echo "CPU: ${cpu}°C / GPU: ${gpu}°C"
+	else
+		echo "CPU: ${cpu}°C"
+	fi
+else
+	echo "N/A"
+fi
+
+exit 0
