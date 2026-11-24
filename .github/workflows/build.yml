@@ -140,7 +140,15 @@ jobs:
           BOARD="${{ steps.cfg.outputs.openwrt_board }}"
           KERNEL="${{ steps.cfg.outputs.openwrt_kernel }}"
 
-          FINGERPRINT="${TAG}|${ARGON}|${BUILDER}|${IP}|${BOARD}|${KERNEL}"
+          # Hash the custom overlay files so that editing extra-files/ triggers a rebuild
+          EXTRA_HASH=""
+          if [[ -d extra-files ]]; then
+            EXTRA_HASH=$(find extra-files -type f -exec sha256sum {} \; | sort | sha256sum | cut -c1-16)
+          else
+            EXTRA_HASH="none"
+          fi
+          
+          FINGERPRINT="${TAG}|${ARGON}|${BUILDER}|${IP}|${BOARD}|${KERNEL}|${EXTRA_HASH}"
 
           PREV=""
           if [[ -f .build-state ]]; then
@@ -283,7 +291,13 @@ jobs:
           IP="${{ steps.cfg.outputs.openwrt_ip }}"
           BOARD="${{ steps.cfg.outputs.openwrt_board }}"
           KERNEL="${{ steps.cfg.outputs.openwrt_kernel }}"
-          printf '%s|%s|%s|%s|%s|%s\n' "$TAG" "$ARGON" "$BUILDER" "$IP" "$BOARD" "$KERNEL" > .build-state
+          EXTRA_HASH=""
+          if [[ -d extra-files ]]; then
+            EXTRA_HASH=$(find extra-files -type f -exec sha256sum {} \; | sort | sha256sum | cut -c1-16)
+          else
+            EXTRA_HASH="none"
+          fi
+          printf '%s|%s|%s|%s|%s|%s|%s\n' "$TAG" "$ARGON" "$BUILDER" "$IP" "$BOARD" "$KERNEL" "$EXTRA_HASH" > .build-state
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .build-state
