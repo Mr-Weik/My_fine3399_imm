@@ -47,6 +47,7 @@ jobs:
             echo "auto_kernel=${AUTO_KERNEL}"
             echo "builder_name=${BUILDER_NAME}"
             echo "source_branch=${SOURCE_BRANCH}"
+            echo "add_argon=${ADD_ARGON:-true}"
           } >> "$GITHUB_OUTPUT"
           echo "### My config:"
           cat config/my-config.txt
@@ -84,17 +85,60 @@ jobs:
             echo "upstream_tag=${TAG}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Detect latest Argon theme release
+        id: argon
+        run: |
+          if [[ "${{ steps.cfg.outputs.add_argon }}" != "true" ]]; then
+            echo "Argon theme disabled by config."
+            {
+              echo "argon_tag=none"
+              echo "theme_url="
+              echo "i18n_url="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG=$(curl -fsSL "https://github.com/jerrykuku/luci-theme-argon/releases.atom" \
+                | grep -oP '(?<=<title>)v\d+\.\d+\.\d+(?=<)' \
+                | head -n1)
+
+          if [[ -z "${TAG}" ]]; then
+            echo "::error::No Argon release tag found"
+            exit 1
+          fi
+          echo "Argon latest tag: ${TAG}"
+
+          ASSETS=$(curl -fsSL "https://github.com/jerrykuku/luci-theme-argon/releases/expanded_assets/${TAG}")
+
+          THEME=$(echo "${ASSETS}" | grep -oP 'releases/download/[^"]+/luci-theme-argon_[^"]+\.ipk' | head -n1)
+          I18N=$(echo "${ASSETS}" | grep -oP 'releases/download/[^"]+/luci-i18n-argon-config-zh-cn_[^"]+\.ipk' | head -n1)
+
+          if [[ -z "${THEME}" ]]; then
+            echo "::error::No Argon theme ipk found in ${TAG}"
+            exit 1
+          fi
+
+          echo "Theme URL: https://github.com/jerrykuku/luci-theme-argon/${THEME}"
+          echo "i18n  URL: https://github.com/jerrykuku/luci-theme-argon/${I18N}"
+
+          {
+            echo "argon_tag=${TAG}"
+            echo "theme_url=https://github.com/jerrykuku/luci-theme-argon/${THEME}"
+            echo "i18n_url=https://github.com/jerrykuku/luci-theme-argon/${I18N}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Check if rebuild needed
         id: check
         run: |
           TAG="${{ steps.detect.outputs.upstream_tag }}"
+          ARGON="${{ steps.argon.outputs.argon_tag }}"
           FORCE="${{ inputs.force || false }}"
           BUILDER="${{ steps.cfg.outputs.builder_name }}"
           IP="${{ steps.cfg.outputs.openwrt_ip }}"
           BOARD="${{ steps.cfg.outputs.openwrt_board }}"
           KERNEL="${{ steps.cfg.outputs.openwrt_kernel }}"
 
-          FINGERPRINT="${TAG}|${BUILDER}|${IP}|${BOARD}|${KERNEL}"
+          FINGERPRINT="${TAG}|${ARGON}|${BUILDER}|${IP}|${BOARD}|${KERNEL}"
 
           PREV=""
           if [[ -f .build-state ]]; then
@@ -108,12 +152,43 @@ jobs:
             echo "FORCE=true -> rebuild anyway."
             echo "need_build=true" >> "$GITHUB_OUTPUT"
           elif [[ "${PREV}" == "${FINGERPRINT}" ]]; then
-            echo "Upstream tag and config unchanged -> skip rebuild."
+            echo "Upstream tag, Argon tag and config unchanged -> skip rebuild."
             echo "need_build=false" >> "$GITHUB_OUTPUT"
           else
             echo "Changes detected -> rebuild."
             echo "need_build=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Prepare Argon theme files
+        if: steps.check.outputs.need_build == 'true' && steps.cfg.outputs.add_argon == 'true'
+        run: |
+          set -e
+          rm -rf argon-files work
+          mkdir -p argon-files work
+
+          for url in "${{ steps.argon.outputs.theme_url }}" "${{ steps.argon.outputs.i18n_url }}"; do
+            if [[ -z "${url}" ]]; then
+              continue
+            fi
+            name="$(basename "${url}")"
+            echo "Downloading ${name}"
+            curl -fsSL "${url}" -o "work/${name}"
+            mkdir -p "work/x_${name}"
+            tar -xzf "work/${name}" -C "work/x_${name}"
+            tar -xzf "work/x_${name}/data.tar.gz" -C argon-files
+          done
+
+          rm -rf work
+
+          # rpcd scripts must stay executable
+          chmod 0755 argon-files/usr/libexec/rpcd/luci.argon* 2>/dev/null || true
+
+          echo "Argon static files:"
+          ls argon-files/www/luci-static/argon/ | head
+          echo "Argon ucode templates:"
+          ls argon-files/usr/share/ucode/luci/template/themes/argon/
+          echo "Argon uci-defaults:"
+          ls argon-files/etc/uci-defaults/
 
       - name: Package OpenWrt for target boards
         if: steps.check.outputs.need_build == 'true'
@@ -125,6 +200,7 @@ jobs:
           auto_kernel: ${{ steps.cfg.outputs.auto_kernel }}
           openwrt_ip: ${{ steps.cfg.outputs.openwrt_ip }}
           builder_name: ${{ steps.cfg.outputs.builder_name }}
+          openwrt_files: ${{ steps.cfg.outputs.add_argon == 'true' && 'argon-files' || '' }}
 
       - name: Upload packaged OpenWrt to Release
         if: steps.check.outputs.need_build == 'true' && env.PACKAGED_STATUS == 'success'
@@ -139,6 +215,7 @@ jobs:
           body: |
             ### My Custom OpenWrt
             - Upstream: `${{ steps.detect.outputs.upstream_tag }}`
+            - Argon: `${{ steps.argon.outputs.argon_tag }}`
             - IP: `${{ steps.cfg.outputs.openwrt_ip }}`
             - Board: `${{ steps.cfg.outputs.openwrt_board }}`
             - Kernel: `${{ steps.cfg.outputs.openwrt_kernel }}`
@@ -148,15 +225,16 @@ jobs:
         if: steps.check.outputs.need_build == 'true' && env.PACKAGED_STATUS == 'success'
         run: |
           TAG="${{ steps.detect.outputs.upstream_tag }}"
+          ARGON="${{ steps.argon.outputs.argon_tag }}"
           BUILDER="${{ steps.cfg.outputs.builder_name }}"
           IP="${{ steps.cfg.outputs.openwrt_ip }}"
           BOARD="${{ steps.cfg.outputs.openwrt_board }}"
           KERNEL="${{ steps.cfg.outputs.openwrt_kernel }}"
-          printf '%s|%s|%s|%s|%s\n' "$TAG" "$BUILDER" "$IP" "$BOARD" "$KERNEL" > .build-state
+          printf '%s|%s|%s|%s|%s|%s\n' "$TAG" "$ARGON" "$BUILDER" "$IP" "$BOARD" "$KERNEL" > .build-state
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .build-state
-          git commit -m "chore: update build state [${TAG}]" || echo "Nothing to commit."
+          git commit -m "chore: update build state [${TAG} / ${ARGON}]" || echo "Nothing to commit."
           git push origin HEAD:main
 
       - name: Build summary
@@ -166,6 +244,7 @@ jobs:
             echo "### Build Summary"
             echo ""
             echo "- Upstream tag: \`${{ steps.detect.outputs.upstream_tag }}\`"
+            echo "- Argon tag: \`${{ steps.argon.outputs.argon_tag }}\`"
             echo "- Need build: \`${{ steps.check.outputs.need_build || 'false' }}\`"
             echo "- Status: \`${{ env.PACKAGED_STATUS || 'skipped' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
