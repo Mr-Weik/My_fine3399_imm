@@ -19,3 +19,7 @@ BUILDER_NAME=my_fine3399_imm
 
 # 源码分支（openwrt_main / lede_master / immortalwrt_master）
 SOURCE_BRANCH=immortalwrt_master
+
+# 是否内置 Argon 主题（true / false）
+# 版本自动跟随 https://github.com/jerrykuku/luci-theme-argon 的最新 release
+ADD_ARGON=true
