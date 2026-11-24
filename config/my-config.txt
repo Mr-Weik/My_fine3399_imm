@@ -23,3 +23,7 @@ SOURCE_BRANCH=immortalwrt_master
 # 是否内置 Argon 主题（true / false）
 # 版本自动跟随 https://github.com/jerrykuku/luci-theme-argon 的最新 release
 ADD_ARGON=true
+
+# 是否内置温度显示（true / false）
+# 注入 /sbin/tempinfo + rpcd ACL，LuCI 主页自动显示 CPU/GPU 温度
+ADD_TEMPINFO=true
